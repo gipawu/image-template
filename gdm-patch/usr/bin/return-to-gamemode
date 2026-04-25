@@ -1,0 +1,49 @@
+#!/bin/bash
+# return-to-gamemode — patchato per GDM (originale usa SDDM)
+#
+# Differenze rispetto all'originale Bazzite:
+#   - Non scrive in /etc/sddm.conf.d/zz-steamos-autologin.conf
+#   - Aggiorna /etc/gdm/custom.conf con la sessione gamescope
+#   - Usa gnome-session-quit per il logout (identico all'originale su GNOME)
+
+set -eu
+
+USERNAME=$(id -nu 1000)
+USER_HOME=$(getent passwd 1000 | cut -d: -f6)
+
+# Verifica che Steam sia installato prima di tornare in game mode
+# (evita loop di boot se Steam non è ancora configurato)
+STEAM_LIB="$USER_HOME/.local/share/Steam/ubuntu12_32/steamui.so"
+if [[ ! -f "$STEAM_LIB" ]]; then
+    echo "Steam non trovato in $STEAM_LIB, impossibile tornare in game mode" >&2
+    exit 1
+fi
+
+# Aggiorna GDM per fare il boot in gamescope alla prossima sessione
+cat > /etc/gdm/custom.conf << GDMCONF
+[daemon]
+AutomaticLoginEnable=True
+AutomaticLogin=${USERNAME}
+DefaultSession=gamescope-session
+
+[security]
+
+[xdmcp]
+
+[chooser]
+
+[debug]
+GDMCONF
+
+# Workaround GDM + gnome-initial-setup (vedi steamos-session-select)
+GNOME_DONE_FLAG="$USER_HOME/.config/gnome-initial-setup-done"
+if [[ ! -f "$GNOME_DONE_FLAG" ]]; then
+    mkdir -p "$(dirname "$GNOME_DONE_FLAG")"
+    touch "$GNOME_DONE_FLAG"
+    chown 1000:1000 "$GNOME_DONE_FLAG"
+fi
+
+# Effettua il logout dal desktop GNOME.
+# GDM rileva il logout e avvia automaticamente la sessione configurata
+# (gamescope-session) grazie all'AutomaticLogin impostato sopra.
+sudo -Eu "$USERNAME" gnome-session-quit --no-prompt

@@ -1,0 +1,68 @@
+#!/bin/bash
+# bazzite-autologin — patchato per GDM (originale configura SDDM)
+#
+# Differenze rispetto all'originale Bazzite:
+#   - Non tocca /etc/sddm.conf.d/
+#   - Scrive la configurazione autologin in /etc/gdm/custom.conf
+#   - Gestisce il workaround gnome-initial-setup-done per sbloccare GDM autologin
+#
+# Questo script viene eseguito da bazzite-autologin.service al boot
+# (una sola volta, poi il servizio si disabilita).
+
+set -eu
+
+USERNAME=$(id -nu 1000 2>/dev/null || echo "")
+
+if [[ -z "$USERNAME" ]]; then
+    echo "Nessun utente con UID 1000 trovato, uscita." >&2
+    exit 1
+fi
+
+USER_HOME=$(getent passwd 1000 | cut -d: -f6)
+
+# Determina quale sessione avviare.
+# Se esiste il file sentinel dell'utente, usa quello.
+# Altrimenti usa gamescope (game mode, default per deck).
+SESSION_SELECT_FILE="$USER_HOME/.config/steamos-session-select"
+
+if [[ -f "$SESSION_SELECT_FILE" ]]; then
+    # Eredita la sessione dal file sentinel (legacy SteamOS compat)
+    _SESSION_TYPE=$(cat "$SESSION_SELECT_FILE" | tr -d '[:space:]')
+    # Il sentinel contiene "wayland" o "x11", non il nome del desktop file.
+    # In questo contesto lo usiamo solo per sapere se siamo in game mode o desktop.
+    # Se il file esiste ed è "wayland"/"x11" significa oneshot desktop → torna in game mode.
+    SESSION_DESKTOP="gamescope-session"
+else
+    # Default: avvia in game mode
+    SESSION_DESKTOP="gamescope-session"
+fi
+
+# Workaround: GDM blocca l'autologin se ~/.config/gnome-initial-setup-done
+# non esiste. Bazzite rimuove gnome-initial-setup, quindi lo creiamo manualmente.
+# Vedi: https://github.com/ublue-os/bazzite/issues/4421
+GNOME_DONE_FLAG="$USER_HOME/.config/gnome-initial-setup-done"
+if [[ ! -f "$GNOME_DONE_FLAG" ]]; then
+    mkdir -p "$(dirname "$GNOME_DONE_FLAG")"
+    touch "$GNOME_DONE_FLAG"
+    chown 1000:1000 "$GNOME_DONE_FLAG"
+    echo "Creato $GNOME_DONE_FLAG per sbloccare GDM autologin"
+fi
+
+# Scrivi la configurazione GDM
+mkdir -p /etc/gdm
+cat > /etc/gdm/custom.conf << GDMCONF
+[daemon]
+AutomaticLoginEnable=True
+AutomaticLogin=${USERNAME}
+DefaultSession=${SESSION_DESKTOP}
+
+[security]
+
+[xdmcp]
+
+[chooser]
+
+[debug]
+GDMCONF
+
+echo "GDM autologin configurato: utente=$USERNAME sessione=$SESSION_DESKTOP"

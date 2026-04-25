@@ -1,0 +1,139 @@
+#!/bin/bash
+# steamos-session-select — patchato per GDM (originale usa SDDM)
+#
+# Differenze rispetto all'originale Bazzite:
+#   - Non scrive in /etc/sddm.conf.d/
+#   - Non fa systemctl restart sddm
+#   - Scrive in /etc/gdm/custom.conf la sessione da avviare
+#   - Fa systemctl restart gdm per applicare il cambio
+#   - La logica sentinel (~/.config/steamos-session-select) è invariata
+
+set -eu
+
+# Legge l'immagine base per sapere se siamo su GNOME o KDE
+BASE_IMAGE_NAME=$(jq -r '."base-image-name"' /usr/share/ublue-os/image-info.json 2>/dev/null || echo "silverblue")
+
+# Mappa argomento → nome del file .desktop della sessione
+# Per GNOME (silverblue):
+#   gamescope            → gamescope-session.desktop
+#   desktop              → gnome-wayland-oneshot.desktop  (oneshot: torna in game mode al logout)
+#   gnome-wayland-persistent → gnome-wayland.desktop     (rimane in desktop mode)
+#   gnome-xorg-persistent    → gnome-xorg.desktop        (X11 persistente)
+#
+# Per KDE (kinoite) — non è il nostro target ma lo manteniamo per compatibilità:
+#   gamescope            → gamescope-session.desktop
+#   desktop / plasma     → plasma-steamos-wayland-oneshot.desktop
+#   plasma-wayland-persistent → plasma.desktop
+#   plasma-x11-persistent    → plasmax11.desktop
+
+SESSION_ARG="${1:-gamescope}"
+
+# Determina il nome del file .desktop in base alla sessione e al DE
+if [[ "$BASE_IMAGE_NAME" == "silverblue" ]]; then
+    case "$SESSION_ARG" in
+        gamescope)
+            SESSION_DESKTOP="gamescope-session.desktop"
+            CREATE_SENTINEL=1
+            ;;
+        desktop|gnome)
+            SESSION_DESKTOP="gnome-wayland-oneshot.desktop"
+            CREATE_SENTINEL=1
+            ;;
+        gnome-wayland-persistent)
+            SESSION_DESKTOP="gnome-wayland.desktop"
+            CREATE_SENTINEL=0
+            ;;
+        gnome-xorg-persistent)
+            SESSION_DESKTOP="gnome-xorg.desktop"
+            CREATE_SENTINEL=0
+            ;;
+        *)
+            echo "Sessione non riconosciuta: $SESSION_ARG" >&2
+            echo "Sessioni valide: gamescope, desktop, gnome-wayland-persistent, gnome-xorg-persistent" >&2
+            exit 1
+            ;;
+    esac
+else
+    # KDE / kinoite
+    case "$SESSION_ARG" in
+        gamescope)
+            SESSION_DESKTOP="gamescope-session.desktop"
+            CREATE_SENTINEL=1
+            ;;
+        desktop|plasma)
+            SESSION_DESKTOP="plasma-steamos-wayland-oneshot.desktop"
+            CREATE_SENTINEL=1
+            ;;
+        plasma-wayland-persistent)
+            SESSION_DESKTOP="plasma.desktop"
+            CREATE_SENTINEL=0
+            ;;
+        plasma-x11-persistent)
+            SESSION_DESKTOP="plasmax11.desktop"
+            CREATE_SENTINEL=0
+            ;;
+        *)
+            echo "Sessione non riconosciuta: $SESSION_ARG" >&2
+            exit 1
+            ;;
+    esac
+fi
+
+# Gestione sentinel: viene creato quando si passa in modalità desktop oneshot.
+# Permette al sistema di tornare automaticamente in game mode al logout.
+if [[ "${SENTINEL_CREATED:-0}" != "1" && "$CREATE_SENTINEL" == "1" && "$SESSION_ARG" != "gamescope" ]]; then
+    USER_HOME=$(getent passwd 1000 | cut -d: -f6)
+    CONF_DIR="${XDG_CONFIG_HOME:-$USER_HOME/.config}"
+
+    # Eredita il tipo di sessione precedente se esiste il file legacy
+    if [[ -f "$CONF_DIR/steamos-session-type" ]]; then
+        cp "$CONF_DIR/steamos-session-type" "$CONF_DIR/steamos-session-select"
+    else
+        echo "wayland" > "$CONF_DIR/steamos-session-select"
+    fi
+
+    export SENTINEL_CREATED=1
+    exec pkexec "$0" "$SESSION_ARG"
+fi
+
+# === SEZIONE ROOT ===
+# Da qui in poi il codice gira come root (via pkexec)
+
+# Ricava il nome utente UID 1000
+USERNAME=$(id -nu 1000)
+
+# Estrae il nome sessione senza .desktop per GDM
+# GDM vuole il nome della sessione senza estensione
+SESSION_NAME="${SESSION_DESKTOP%.desktop}"
+
+# Scrivi la configurazione GDM per l'autologin
+# /etc/gdm/custom.conf è il file di configurazione principale di GDM
+cat > /etc/gdm/custom.conf << GDMCONF
+[daemon]
+AutomaticLoginEnable=True
+AutomaticLogin=${USERNAME}
+DefaultSession=${SESSION_NAME}
+
+[security]
+
+[xdmcp]
+
+[chooser]
+
+[debug]
+GDMCONF
+
+# Workaround: GDM blocca l'autologin se non esiste gnome-initial-setup-done.
+# Bazzite rimuove gnome-initial-setup dal sistema, ma GDM controlla questo file.
+# Lo creiamo nella home dell'utente per sbloccare l'autologin.
+USER_HOME=$(getent passwd 1000 | cut -d: -f6)
+GNOME_DONE_FLAG="$USER_HOME/.config/gnome-initial-setup-done"
+if [[ ! -f "$GNOME_DONE_FLAG" ]]; then
+    mkdir -p "$(dirname "$GNOME_DONE_FLAG")"
+    touch "$GNOME_DONE_FLAG"
+    chown 1000:1000 "$GNOME_DONE_FLAG"
+fi
+
+# Riavvia GDM per applicare la nuova configurazione di sessione
+systemctl reset-failed gdm 2>/dev/null || true
+systemctl restart gdm
