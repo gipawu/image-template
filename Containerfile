@@ -60,6 +60,7 @@ RUN \
 
 RUN \
     # SDDM: rimuovi configurazioni, temi e pacchetto
+    systemctl disable sddm.service && \
     rpm-ostree override remove sddm 2>/dev/null || true && \
     rm -rf /etc/sddm.conf \
            /etc/sddm.conf.d \
